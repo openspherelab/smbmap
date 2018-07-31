@@ -1,4 +1,11 @@
 #! /usr/bin/env python2
+# coding : utf8 
+# fix ops to work with unicode (coding)
+
+###
+# Smbmap unicode based on smbmap.py from ShawnDEvans : https://github.com/ShawnDEvanssmbmap
+###
+
 import sys
 import uuid
 import signal
@@ -29,6 +36,16 @@ import re
 # https://impacket.googlecode.com
 # Seriously, the most amazing Python library ever!!
 # Many thanks to that dev team
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 OUTPUT_FILENAME = ''.join(random.sample('ABCDEFGHIGJLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 10))
 BATCH_FILENAME  = ''.join(random.sample('ABCDEFGHIGJLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 10)) + '.bat'
@@ -275,6 +292,8 @@ class SMBMap():
         self.smbconn = {}
         self.isLoggedIn = False
         self.pattern = None
+        self.customPath = None
+        self.excludeDir = []
         self.hosts = {}
         self.jobs = {}
         self.search_output_buffer = ''
@@ -455,29 +474,34 @@ class SMBMap():
             print '\tNo mapped network drives'
         pass    
         
-    def output_shares(self, host, lsshare, lspath, verbose=True):
+    # OPS Fix to stop trying to write in shares, "testWrite" parameter added
+    def output_shares(self, host, lsshare, lspath, jfiles,verbose=True, nowrite=False):
         shareList = [lsshare] if lsshare else self.get_shares(host)
         for share in shareList:
             error = 0
             pathList = {}
             canWrite = False
-            try:
-                root = string.replace('/%s' % (PERM_DIR),'/','\\')
-                root = ntpath.normpath(root)
-                self.create_dir(host, share, root)
-                print '\t%s\tREAD, WRITE' % (share.ljust(50))
-                canWrite = True
-                try:
-                    self.remove_dir(host, share, root)
-                except:
-                    print '\t[!] Unable to remove test directory at \\\\%s\\%s%s, plreae remove manually' % (host, share, root)
-            except Exception as e:
-                #print e
-                exc_type, exc_obj, exc_tb = sys.exc_info()
-                fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                #print(exc_type, fname, exc_tb.tb_lineno)
-                sys.stdout.flush()
-                canWrite = False
+            # OPS Fix to stop trying to write in shares todo  
+            # if nowrite==false, will write a test directory to share
+            # if nwrite==true, will not write a directory to share
+            if nowrite == False:
+                try:                
+                    root = string.replace('/%s' % (PERM_DIR),'/','\\')
+                    root = ntpath.normpath(root)
+                    self.create_dir(host, share, root)
+                    print '\t%s\tREAD, WRITE' % (share.ljust(50))
+                    canWrite = True
+                    try:
+                        self.remove_dir(host, share, root)
+                    except:
+                        print '\t[!] Unable to remove test directory at \\\\%s\\%s%s, plreae remove manually' % (host, share, root)
+                except Exception as e:
+                    #print e
+                    exc_type, exc_obj, exc_tb = sys.exc_info()
+                    fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                    #print(exc_type, fname, exc_tb.tb_lineno)
+                    sys.stdout.flush()
+                    canWrite = False
 
             if canWrite == False:
                 readable = self.list_path(host, share, '', self.pattern, False)
@@ -509,6 +533,10 @@ class SMBMap():
                         if self.pattern:
                             print '\t[+] Starting search for files matching \'%s\' on share %s.' % (self.pattern, share)
                         dirList = self.list_path_recursive(host, share, path, '*', pathList, self.pattern, verbose)
+                if jfiles:
+                    print (bcolors.HEADER+'\t[+] Starting search for juicy files on share '+bcolors.BOLD+'[%s].' % (share)+bcolors.ENDC)                    
+                    path = self.customPath if self.customPath != None else path
+                    dirList = self.list_juicy_files(host, share, path, pathList, self.pattern)
             
             if error > 0 and verbose:
                 print '\t%s\tNO ACCESS' % (share.ljust(50))
@@ -520,6 +548,39 @@ class SMBMap():
             shares.append(shareList[item]['shi1_netname'][:-1])
         return shares 
 
+    def list_juicy_files(self,host,share,path,pathList, _pattern):
+        root = self.pathify(path)
+        root = ntpath.normpath(root)
+        dirList = []
+        pattern = ['.avi', '.mp3', '.mpg','pass','tomcat-user', 'tnsnames' ,'sam', 'config', 'backup', 'back', 'bak', '.sdf', '.vmdk', ] if _pattern == None else _pattern.split(',')
+        try:
+            pathList[root] = self.smbconn[host].listPath(share, root)
+            if len(pathList[root]) > 2:
+                for smbItem in pathList[root]:
+                    try:
+                        filename = smbItem.get_longname()
+                        filesize = smbItem.get_filesize()
+                        rights = 'w' if smbItem.is_readonly() > 0 else 'r'
+                        date = time.ctime(float(smbItem.get_mtime_epoch()))
+                        isDir = True if smbItem.is_directory() > 0 else False
+                        rootFolders = True if filename == '.' or filename == '..' else False
+                        if not isDir:
+                            for p in pattern:
+                                fileMatch = re.search(p, filename.lower())
+                                if fileMatch:
+                                    clean_path = str(path[2:]) if self.customPath == None else str(path)
+                                    print (bcolors.OKGREEN+'\t\\\\%s\\%s\\%s\\%s - %s - %s - %s' % (host,share,clean_path.replace('/','\\'),filename,str(filesize),rights,date)+bcolors.ENDC)
+                                    break
+                        
+                        if isDir and not rootFolders and not filename in self.excludeDir:
+                            dirList.append('%s/%s'%(path,filename))
+                    except Exception as e:
+                        print(e)
+                for dir in dirList:
+                    self.list_juicy_files(host, share, str(dir), pathList, _pattern)
+        except Exception as e:
+            print(e)
+        
     def list_path_recursive(self, host, share, pwd, wildcard, pathList, pattern, verbose):
         root = self.pathify(pwd)
         root = ntpath.normpath(root)
@@ -756,9 +817,10 @@ def signal_handler(signal, frame):
 if __name__ == "__main__":
    
     example = 'Examples:\n\n'
-    example += '$ python smbmap.py -u jsmith -p password1 -d workgroup -H 192.168.0.1\n'
-    example += '$ python smbmap.py -u jsmith -p \'aad3b435b51404eeaad3b435b51404ee:da76f2c4c96028b7a6111aef4a50a94d\' -H 172.16.0.20\n'
-    example += '$ python smbmap.py -u \'apadmin\' -p \'asdf1234!\' -d ACME -h 10.1.3.30 -x \'net group "Domain Admins" /domain\'\n'
+    example += '$ smbmap -u jsmith -p password1 -d workgroup -H 192.168.0.1\n'
+    example += '$ smbmap -u jsmith -p \'aad3b435b51404eeaad3b435b51404ee:da76f2c4c96028b7a6111aef4a50a94d\' -H 172.16.0.20\n'
+    example += '$ smbmap -u \'apadmin\' -p \'asdf1234!\' -d ACME -h 10.1.3.30 -x \'net group "Domain Admins" /domain\'\n'
+    example += '$ smbmap -u \'apadmin\' -p \'asdf1234!\' -d ACME -h 10.1.3.30 --juicy-files --juicy-patterns password,back --juicy-search-path \'/Users\' --exclude-dir \'Windows,Program Files,Program Files (x86),ProgramData\'\n'
     
     parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description="SMBMap - Samba Share Enumerator | Shawn Evans - ShawnDEvans@gmail.com", epilog=example)
 
@@ -771,6 +833,7 @@ if __name__ == "__main__":
     sgroup.add_argument("-s", metavar="SHARE", dest='share', default="C$", help="Specify a share (default C$), ex 'C$'")
     sgroup.add_argument("-d", metavar="DOMAIN", dest='domain', default="WORKGROUP", help="Domain name (default WORKGROUP)")
     sgroup.add_argument("-P", metavar="PORT", dest='port', type=int, default=445, help="SMB port (default 445)")
+    sgroup.add_argument("--nowrite", dest="nowrite", action="store_true", default=False, help="Do not write on share (do not test if share is writeable")
 
     sgroup2 = parser.add_argument_group("Command Execution", "Options for executing commands on the specified host")
     sgroup2.add_argument("-x", metavar="COMMAND", dest='command', help="Execute a command ex. 'ipconfig /all'")
@@ -794,6 +857,15 @@ if __name__ == "__main__":
     sgroup5.add_argument("--skip", default=False, action="store_true", help="Skip delete file confirmation prompt")
     
 
+    sgroup6 = parser.add_argument_group("Searching Juicy Files","Options for searching files with specific name or content")
+    sgroup6.add_argument("--juicy-files", dest="juicyFiles",action="store_true", help="Search for files containing sensitive information")
+    sgroup6.add_argument("--juicy-patterns", metavar="JFPATTERN", dest="pattern", help="Define a file name pattern (list) ex: back,bck (overwrite default list)")
+    sgroup6.add_argument("--juicy-search-path", metavar="JFPATH", dest="customPath", help="Start search file from specified path. Ex: /windows/System32")
+    sgroup6.add_argument("--exclude-dir", dest='excludeDir', help='List of directory name to exclude in the search file ex: "programs,windows"')
+    # TODO:sgroup6.add_argument("--juicy-include-dir") ## different from --juicy-files => if path contains a dir in this list, it is parsed. Else it is not parsed. Ex: --juicy-include-dir 'Desktop,AppData,...'
+    # TODO: sgroup6.add_argument("--content")
+    # TODO: --HMask 10.10.10.10/24
+
     if len(sys.argv) is 1:
         parser.print_help()
         sys.exit(1)
@@ -807,14 +879,15 @@ if __name__ == "__main__":
 
     lsshare = False 
     lspath = False
-    
-  
+    jfiles = False
+        
     
     if args.recursive_dir_list != None:
         mysmb.recursive = True
         mysmb.list_files = True
         try:
-            lspath = args.recursive_dir_list.replace('/','\\').split('\\')
+	        # Fix ops to work with unicode
+            lspath = args.recursive_dir_list.decode('utf8').replace('/','\\').split('\\')
             lsshare = lspath[0]
             lspath = '\\'.join(lspath[1:])
         except:
@@ -823,7 +896,7 @@ if __name__ == "__main__":
     elif args.dir_list != None:
         mysmb.list_files = True
         try:
-            lspath = args.dir_list.replace('/','\\').split('\\')
+            lspath = args.dir_list.decode('utf8').replace('/','\\').split('\\')
             lsshare = lspath[0]
             lspath = '\\'.join(lspath[1:])
         except:
@@ -853,7 +926,11 @@ if __name__ == "__main__":
     mysmb.hosts = host
     mysmb.smart_login()
     if args.pattern:
-        mysmb.pattern = args.pattern
+        mysmb.pattern = args.pattern.decode('utf8')
+    if args.customPath:
+        mysmb.customPath = args.customPath.decode('utf8')
+    if args.excludeDir:
+        mysmb.excludeDir = args.excludeDir.decode('utf8')
     counter = 0
     for host in mysmb.hosts.keys():
         if args.file_content_search:
@@ -887,12 +964,13 @@ if __name__ == "__main__":
             if args.command:
                 mysmb.exec_command(host, args.share, args.command, True, mysmb.hosts[host]['name'])
                 sys.exit()
-
+            if args.juicyFiles:
+                jfiles = True
             if not args.dlPath and not args.upload and not args.delFile and not args.list_drives and not args.command and not args.file_content_search:
                 print '[+] IP: %s:%s\tName: %s' % (host, mysmb.hosts[host]['port'], mysmb.hosts[host]['name'].ljust(50))
                 print '\tDisk%s\tPermissions' % (' '.ljust(50))
                 print '\t----%s\t-----------' % (' '.ljust(50))
-                mysmb.output_shares(host, lsshare, lspath, args.verbose)
+                mysmb.output_shares(host, lsshare, lspath, jfiles,args.verbose, args.nowrite)
 
         except SessionError as e:
             print '[!] Access Denied'
